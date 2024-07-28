@@ -2,6 +2,9 @@ import yaml
 import json
 import argparse
 import os
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
+os.environ["WORLD_SIZE"] = "1"
 import numpy as np
 import torch
 import torchmetrics
@@ -9,7 +12,8 @@ from torchmetrics.classification import MulticlassAccuracy, MulticlassPrecision,
 from minigpt4.common.eval_utils import prepare_texts, init_model
 from minigpt4_video_inference import run,setup_seeds
 from utils import init_logger
-
+from huggingface_hub import login
+login(token="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")
 
 def get_arguments():
     """
@@ -32,7 +36,7 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Inference parameters")
     parser.add_argument("--cfg-path", help="path to configuration file.",default="test_configs/llama2_test_config.yaml")
     parser.add_argument("--ckpt", type=str,default='checkpoints/video_llama_checkpoint_last.pth', help="path to checkpoint")
-    parser.add_argument("--videos-dir", type=str,required=True, help="location of videos directory")
+    #parser.add_argument("--videos-dir", type=str,required=True, help="location of videos directory", default="/home/tup30353/videos/videos")
     parser.add_argument("--question",
                         type=str, 
                         default="This is a student performing tasks in an online setting. Choose whether the student is 'not engaged','barely engaged', 'engaged', or 'highly engaged'.",
@@ -40,7 +44,7 @@ def get_arguments():
     parser.add_argument(
         "--label-path", 
         type=str, 
-        default='/home/tony/engagenet_labels/validation_engagement_labels.json',
+        default='/home/tup30353/videos/validation_engagement_labels.json',
         help="path to EngageNet Labels"
     )
     parser.add_argument("--num-classes", type=int, help="# of classes",default=4)
@@ -89,6 +93,8 @@ def load_metrics(num_classes:int)->torchmetrics.MetricCollection:
 def main()->None:
     logger.info("Starting Inference")
     args = get_arguments()
+    videos_dir= "/home/tup30353/videos/videos"
+    #videos_dir= "/home/tup30353/test"
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{args.gpu_id}"
     
     with open(args.cfg_path) as file:
@@ -110,17 +116,22 @@ def main()->None:
     question = args.question
     pred_table,target_table = torch.zeros(num_classes).to(config['run']['device']),\
         torch.zeros(num_classes).to(config['run']['device'])
-
-    for sample,vid_path in enumerate(os.listdir(args.videos_dir)):
+    check =0
+    for sample,vid_path in enumerate(os.listdir(videos_dir)):
         if not ".mp4" in vid_path:
             continue
         
         vid_id = vid_path.split(".mp4")[0]
-        vid_path = os.path.join(args.videos_dir, vid_path)
+        vid_path = os.path.join(videos_dir, vid_path)
         logger.info("Processing video - {}".format(vid_id))
         answer = run(vid_path, question, model, vis_processor,max_new_tokens, gen_subtitles=False)
-        
+        question2 = '''Given the label set with engagement_level: ["Not Engaged","Barely Engaged","Engaged","Highly Engaged"] Question: Rate the level of engagement of the person in this video given the set of labels above? Answer me in the JSON format like:
+{“label”: “engagement_level”}
+'''
+        answer2 = run(vid_path, question2, model, vis_processor,max_new_tokens, gen_subtitles=False)
         logger.info("SAMPLE:{} {} - {}".format(sample,label[vid_id],answer))
+        #save the indices where classes match the class of the label with video id
+        
         target_table[0] = np.where(classes == label[vid_id])[0][0]
         pred_table[0] = target_table[0] if label[vid_id].split(' ')[-1] == answer.lower() else (target_table[check] - 1) % num_classes
         logger.info(f"CORRECT:{pred_table[0]} - {target_table[0]} - {pred_table[0] == target_table[0]}")
@@ -142,9 +153,11 @@ def main()->None:
         
         pred_set = {
             'video_name':vid_id,
-            'Q':question,
-            'A':label[vid_id],
-            'pred':answer
+            'q1':question,
+            'a':label[vid_id],
+            'q2':question2,
+            'pred1':answer,
+            'pred2':answer2
         }
         pred_samples.append(pred_set)
     
@@ -156,7 +169,7 @@ def main()->None:
     metrics.reset()
     
     model_card = args.cfg_path.split(".yaml")[0].split(os.sep)[-1]
-    with open(f'gpt_evaluation/{model_card}_eval.json','w') as f:
+    with open(f'gpt_evaluation/test_eval.json','w') as f:
         json.dump(pred_samples,f,indent=4) 
     return
 

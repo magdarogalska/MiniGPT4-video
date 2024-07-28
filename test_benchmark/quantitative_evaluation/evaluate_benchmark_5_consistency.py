@@ -117,9 +117,9 @@ def main():
     prediction_set = {}
     for sample in new_pred_contents:
         id = sample['video_name']
-        question1 = sample['Q1']
-        question2 = sample['Q1']
-        answer = sample['A']
+        question1 = sample['q1']
+        question2 = sample['q2']
+        answer = sample['a']
         pred1 = sample['pred1']
         pred2 = sample['pred2']
         qa_set = {"q1": question1, "q2": question2, "a": answer, "pred1": pred1, "pred2": pred2}

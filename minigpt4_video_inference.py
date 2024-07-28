@@ -26,7 +26,7 @@ program = os.path.basename(__file__)
 if os.path.exists(f"logs/{os.path.splitext(program)[0]}.log"):
     os.remove(f"logs/{os.path.splitext(program)[0]}.log")
 logger = init_logger(program)
-
+#this function is sorting frames with their corresponding subtitles
 def prepare_input(vis_processor,video_path,subtitle_path,instruction):  
     cap = cv2.VideoCapture(video_path)
     if subtitle_path is not None: 
@@ -61,6 +61,7 @@ def prepare_input(vis_processor,video_path,subtitle_path,instruction):
             break
         # Find the corresponding subtitle for the frame and combine the interval subtitles into one subtitle
         # we choose 1 frame for every 2 seconds,so we need to combine the subtitles in the interval of 2 seconds
+
         if subtitle_path is not None: 
             for subtitle in vtt_file:
                 sub=subtitle.text.replace('\n',' ')
@@ -69,6 +70,80 @@ def prepare_input(vis_processor,video_path,subtitle_path,instruction):
                         subtitle_text_in_interval+=sub+" "
                     history_subtitles[sub]=True
                     break
+        if frame_count % sampling_interval == 0:
+            raw_frames.append(Image.fromarray(cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2RGB)))
+            frame = transform(frame[:,:,::-1]) # convert to RGB
+            frame = vis_processor(frame)
+            images.append(frame)
+            img_placeholder += '<Img><ImageHere>'
+            if subtitle_path is not None and subtitle_text_in_interval != "" and number_of_words< max_sub_len: 
+                img_placeholder+=f'<Cap>{subtitle_text_in_interval}'
+                number_of_words+=len(subtitle_text_in_interval.split(' '))
+                subtitle_text_in_interval = ""
+        frame_count += 1
+
+        if len(images) >= max_images_length:
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+    if len(images) == 0:
+        # skip the video if no frame is extracted
+        return None,None
+    images = torch.stack(images)
+    instruction = img_placeholder + '\n' + instruction
+    return images,instruction
+    #instruction is a string, can we output the list?
+def extract_prefix(s):
+    parts = s.split('_')
+    return '_'.join(parts[:-1])
+
+def prepare_input_with_rppg(vis_processor,video_path,dict_path,instruction):  
+    cap = cv2.VideoCapture(video_path)
+    if dict_path is not None: 
+        #get the vector names
+        dict_file = torch.load(dict_path) 
+        prefix = extract_prefix(key)
+        logger.info("torch dictionary loaded successfully")  
+        clip = VideoFileClip(video_path)
+        total_num_frames = int(clip.duration * clip.fps)
+        # logger.info("Video duration = ",clip.duration)
+        clip.close()
+        
+    else :
+        # calculate the total number of frames in the video using opencv        
+        total_num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) 
+    max_images_length = 45
+    max_sub_len = 400
+    images = []
+    frame_count = 0
+    #sample total number of frames / 45
+    sampling_interval = int(total_num_frames / max_images_length)
+    if sampling_interval == 0:
+        sampling_interval = 1
+    img_placeholder = ""
+    #subtitle_text_in_interval = ""
+    history_subtitles = {}
+    raw_frames=[]
+    number_of_words=0
+    transform=transforms.Compose([
+                transforms.ToPILImage(),
+            ])
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # Find the corresponding subtitle for the frame and combine the interval subtitles into one subtitle
+        # we choose 1 frame for every 2 seconds,so we need to combine the subtitles in the interval of 2 seconds
+
+        if dict_path is not None:
+            video_name = os.path.splitext(video_path)[0] 
+            video_name = video_name.split('/')[-1]
+            print(video_name)
+            #find the rppg vectors belonging to the video
+            tensor_dict = dict_file[video_name]
+            tensor = tensor_dict['latent_representation']
+            rppg_token = tensor.reshape(1,5,4096).shape
+
         if frame_count % sampling_interval == 0:
             raw_frames.append(Image.fromarray(cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2RGB)))
             frame = transform(frame[:,:,::-1]) # convert to RGB
@@ -117,11 +192,13 @@ def generate_subtitles(video_path):
         return None
     
 
-def run (video_path,instruction,model,vis_processor,max_new_tokens,gen_subtitles=True):
+def run (video_path,instruction,model,vis_processor,max_new_tokens,dict_path, gen_subtitles=False):
     if gen_subtitles:
         subtitle_path=generate_subtitles(video_path)
     else :
         subtitle_path=None
+    #sorted images interleaving with texts
+    print("test")
     prepared_images,prepared_instruction=prepare_input(vis_processor,video_path,subtitle_path,instruction)
     if prepared_images is None:
         return "Video cann't be open ,check the video path again"
@@ -133,7 +210,17 @@ def run (video_path,instruction,model,vis_processor,max_new_tokens,gen_subtitles
     conv.append_message(conv.roles[0], prepared_instruction)
     conv.append_message(conv.roles[1], None)
     prompt = [conv.get_prompt()]
-    answers = model.generate(prepared_images, prompt, max_new_tokens=max_new_tokens, do_sample=True, lengths=[length],num_beams=1)
+    video_name = os.path.splitext(video_path)[0] 
+    video_name = video_name.split('/')[-1]
+    #find the rppg vectors belonging to the video
+    dict_file = torch.load(dict_path) 
+    print(video_name)
+    tensor_dict = dict_file[video_name]
+    
+    print(tensor_dict['latent_representation'].shape)
+    tensor = tensor_dict['latent_representation']
+
+    answers = model.generate(prepared_images, prompt, max_new_tokens=max_new_tokens, do_sample=True, lengths=[length],num_beams=1, rppg_tensors=tensor)
     return answers[0]
 
   
@@ -147,6 +234,7 @@ def get_arguments():
     parser.add_argument("--max_new_tokens", type=int, default=512, help="max number of generated tokens")
     parser.add_argument("--lora_r", type=int, default=64, help="lora rank of the model")
     parser.add_argument("--lora_alpha", type=int, default=16, help="lora alpha")
+    parser.add_argument("--dict_path", type=str, help="path to the rppg signals")
     parser.add_argument(
         "--options",
         nargs="+",
@@ -185,6 +273,7 @@ if __name__ == "__main__":
     video_path=args.video_path
     instruction=args.question
     add_subtitles=args.add_subtitles
+    dict_path = args.dict_path
     # setup_seeds(seed)
-    pred=run(video_path,instruction,model,vis_processor,gen_subtitles=add_subtitles)
+    pred=run(video_path,instruction,model,vis_processor,args.max_new_tokens, dict_path, gen_subtitles=add_subtitles)
     logger.info(pred)

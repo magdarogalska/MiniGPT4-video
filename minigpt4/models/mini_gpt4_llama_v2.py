@@ -92,6 +92,7 @@ class MiniGPT4_llama_v2(Blip2Base):
         self.max_context_len = max_context_len
         self.chat_template = chat_template
 
+        
         if freeze_vit:
             # vit_precision="fp32"
             logger.info(f"vit precision {vit_precision}")
@@ -216,9 +217,10 @@ class MiniGPT4_llama_v2(Blip2Base):
             inputs_llama = self.llama_proj(image_embeds) # project to llama input size (200,64,5632) -> (200,64,4096)
             atts_llama = torch.ones(inputs_llama.size()[:-1], dtype=torch.long).to(image.device)
         return inputs_llama, atts_llama
-
+#Here getting context embeddings
     def get_context_emb(self, prompt, img_list):
         img_device = img_list[0].device
+        #splitting the prompt with corresponding images
         prompt_segs = prompt.split('<ImageHere>')
         assert len(prompt_segs) == len(img_list) + 1, "Unmatched numbers of image placeholders and images."
         seg_tokens = [
@@ -228,6 +230,29 @@ class MiniGPT4_llama_v2(Blip2Base):
         ]
 
         seg_embs = [self.embed_tokens(seg_t) for seg_t in seg_tokens]
+
+        mixed_embs = [emb for pair in zip(seg_embs[:-1], img_list) for emb in pair] + [seg_embs[-1]]
+
+        mixed_embs = torch.cat(mixed_embs, dim=1)
+        
+        return mixed_embs
+
+    def get_context_emb_with_rppg(self, prompt, img_list, rppg_tensors):
+        img_device = img_list[0].device
+        #splitting the prompt with corresponding images
+        prompt_segs = prompt.split('<ImageHere>')
+        assert len(prompt_segs) == len(img_list) + 1, "Unmatched numbers of image placeholders and images."
+        seg_tokens = [
+            self.llama_tokenizer(
+                seg, return_tensors="pt", add_special_tokens=i==0).to(img_device).input_ids  # only add bos to the first seg
+            for i, seg in enumerate(prompt_segs)
+        ]
+        
+
+        seg_embs = [self.embed_tokens(seg_t) for seg_t in seg_tokens]
+        rppg_token = rppg_tensors.reshape(1,5,4096).to(img_device)
+        for i in range(len(seg_embs) - 1):
+            seg_embs[i] = rppg_token
 
         mixed_embs = [emb for pair in zip(seg_embs[:-1], img_list) for emb in pair] + [seg_embs[-1]]
 
@@ -482,7 +507,7 @@ class MiniGPT4_llama_v2(Blip2Base):
         loss = outputs.loss
 
         return {"loss": loss}
-
+#generate -> texts is prompt string with <Image> as a divider between frames and their corresponding subtitles
     @torch.no_grad()
     def generate(
         self,
@@ -505,6 +530,8 @@ class MiniGPT4_llama_v2(Blip2Base):
         num_return_sequences=1,
         stopping_criteria=None,
         pad_token_id=None,
+        rppg_tensors = None,
+
     ):
         '''
             function for generate test use
@@ -529,8 +556,12 @@ class MiniGPT4_llama_v2(Blip2Base):
         else:
             image_lists = [[image_emb[None]] for image_emb in img_embeds]
         assert len(texts) == len(image_lists)
-        batch_embs = [self.get_context_emb(text, img_list) for text, img_list in zip(texts, image_lists)]
-
+        #text is prompt with subtitles
+        #here changing
+        if rppg_tensors is not None:
+            batch_embs = [self.get_context_emb_with_rppg(text, img_list,rppg_tensors) for text, img_list in zip(texts, image_lists)]
+        else:
+            batch_embs = [self.get_context_emb(text, img_list) for text, img_list in zip(texts, image_lists)]
         batch_size = len(batch_embs)
         max_len = max([emb.shape[1] for emb in batch_embs])
         emb_dim = batch_embs[0].shape[2]
